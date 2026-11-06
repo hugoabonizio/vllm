@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for ThinkingBudgetStateHolder batch index moves."""
 
+import pytest
 import torch
 
 from tests.v1.sample.utils import create_mock_reasoning_config
@@ -89,3 +90,125 @@ def test_swap_exchanges_two_budgeted_states():
     )
     assert h._state[0]["thinking_token_budget"] == b1
     assert h._state[1]["thinking_token_budget"] == b0
+
+
+START = 100
+END = 200
+PHRASE_A = 201
+PHRASE_B = 202
+OVERRIDE = 203
+CONTENT = 50
+THINK = 60
+VOCAB_SIZE = 256
+
+
+def _generate(
+    holder: ThinkingBudgetStateHolder,
+    params: list[SamplingParams],
+    scripted: list[list[int]],
+    num_steps: int,
+    outputs: list[list[int]] | None = None,
+) -> list[list[int]]:
+    """Greedily decode: take a forced token if any, else the scripted token.
+
+    `outputs` holds tokens generated before a preemption, for resumed requests.
+    """
+    if outputs is None:
+        outputs = [[] for _ in params]
+    holder.sync_batch(
+        BatchUpdate(
+            batch_size=len(params),
+            removed=(),
+            added=[(i, p, None, outputs[i]) for i, p in enumerate(params)],
+            moved=(),
+        )
+    )
+    for step in range(num_steps):
+        holder.update_state(output_token_ids=outputs, spec_token_ids=None)
+        logits = torch.zeros((len(params), VOCAB_SIZE))
+        holder.apply_to_logits(logits, predict_bonus_token=False, spec_token_ids=None)
+        for i, output in enumerate(outputs):
+            if logits[i].max() > 1.0e8:
+                output.append(int(logits[i].argmax()))
+            else:
+                output.append(scripted[i][step] if step < len(scripted[i]) else THINK)
+    return outputs
+
+
+def test_per_request_reasoning_end_str_overrides_forced_sequence():
+    """Requests in one batch force their own end sequence, or the default."""
+    holder = ThinkingBudgetStateHolder(
+        create_mock_reasoning_config([START], [END]),
+        8,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    override = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[PHRASE_A, PHRASE_B, END]
+    )
+    thinking = [START] + [THINK] * 10
+
+    default_out, override_out = _generate(
+        holder,
+        [SamplingParams(thinking_token_budget=3), override],
+        [thinking, thinking],
+        num_steps=8,
+    )
+
+    assert default_out[:5] == [START, THINK, THINK, THINK, END]
+    assert override_out[:7] == [START, THINK, THINK, THINK, PHRASE_A, PHRASE_B, END]
+    # Forcing stops once the end sequence is complete.
+    assert override_out[7] == THINK
+
+
+@pytest.mark.parametrize(
+    "emitted",
+    [[], [PHRASE_A], [PHRASE_A, PHRASE_B], [PHRASE_A, PHRASE_B, END]],
+    ids=["none", "one", "two", "all"],
+)
+def test_resumed_request_continues_its_end_sequence(emitted):
+    """After a preemption, forcing continues where the sequence stopped, and a
+    completed sequence ends reasoning although the server's differs."""
+    holder = ThinkingBudgetStateHolder(
+        create_mock_reasoning_config(
+            [START], [OVERRIDE, END], natural_end_token_ids=[END]
+        ),
+        8,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    end_sequence = [PHRASE_A, PHRASE_B, END]
+    resumed = [START, THINK, THINK, THINK, *emitted]
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=end_sequence
+    )
+
+    (output,) = _generate(holder, [params], [[]], num_steps=4, outputs=[list(resumed)])
+
+    remaining = end_sequence[len(emitted) :]
+    assert output[len(resumed) :] == [*remaining, *[THINK] * (4 - len(remaining))]
+
+
+def test_natural_end_stops_budget_with_transition_phrase():
+    """Reasoning closed by the model's own end marker is over: the server's
+    transition phrase must not be forced into the answer."""
+    holder = ThinkingBudgetStateHolder(
+        create_mock_reasoning_config(
+            [START], [PHRASE_A, PHRASE_B, END], natural_end_token_ids=[END]
+        ),
+        8,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+
+    (output,) = _generate(
+        holder,
+        [SamplingParams(thinking_token_budget=4)],
+        [[START, THINK, THINK, END] + [CONTENT] * 12],
+        num_steps=14,
+    )
+
+    assert output == [START, THINK, THINK, END] + [CONTENT] * 10

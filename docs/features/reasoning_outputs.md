@@ -339,6 +339,30 @@ for output in outputs:
     print("text:", output.outputs[0].text)
 ```
 
+### Per-Request End String
+
+`reasoning_end_str` in `--reasoning-config` is the server-wide default. A request can override it with its own `reasoning_end_str`, for example to use a transition phrase in the user's language, without restarting the server:
+
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [
+      { "role": "user", "content": "9,11 e 9,8: qual é maior?" }
+    ],
+    "thinking_token_budget": 10,
+    "reasoning_end_str": "Preciso dar a resposta com base no raciocínio até aqui.</think>"
+  }'
+```
+
+The field is accepted by the Chat Completions, Completions, Responses and Anthropic Messages APIs (where the budget comes from `thinking.budget_tokens`), and offline as `SamplingParams(thinking_token_budget=10, reasoning_end_str=...)`. It only takes effect together with `thinking_token_budget`, and it is rejected together with `use_beam_search`. The Rust frontend (`VLLM_USE_RUST_FRONTEND=1`) does not support it yet and rejects it with a 400 error.
+
+The string must end with the reasoning end marker (e.g. `</think>`), must not contain that marker earlier or contain the reasoning start marker (compared as tokens), and may tokenize to at most 128 tokens. Otherwise, the request is rejected: vLLM stops forcing as soon as it sees the end marker, and the reasoning parser splits reasoning from content on it. The end marker comes from `--reasoning-parser`. Without a parser, the end marker is the server's whole `reasoning_end_str`, so per-request strings can only add text before it.
+
+!!! warning
+    On the V1 model runner (used when Model Runner V2 does not support the configuration), multi-token end strings can be corrupted under speculative decoding ([#58485](https://github.com/vllm-project/vllm/issues/58485)). This applies to the server-wide `reasoning_end_str` as well.
+
 ## Automatic `enable_thinking` Activation
 
 Some models (such as Gemma 4, DeepSeek-V4-Pro and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.

@@ -74,3 +74,24 @@ def test_completion_request_accepts_minus_one_as_unlimited():
         }
     )
     assert request.thinking_token_budget is None
+
+
+@pytest.mark.parametrize(
+    "request_cls,payload",
+    [
+        (ChatCompletionRequest, {"messages": [{"role": "user", "content": "hi"}]}),
+        (CompletionRequest, {"prompt": "hi"}),
+    ],
+)
+def test_reasoning_end_str_is_rejected_with_beam_search(request_cls, payload):
+    """Beam search drops the thinking budget; the override must not look applied."""
+    with pytest.raises(VLLMValidationError, match="reasoning_end_str"):
+        request_cls.model_validate(
+            {
+                "model": "qwen",
+                **payload,
+                "use_beam_search": True,
+                "thinking_token_budget": 8,
+                "reasoning_end_str": "Time to answer.</think>",
+            }
+        )

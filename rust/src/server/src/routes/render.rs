@@ -109,6 +109,7 @@ fn lower_render_request(
             stop: None,
             include_stop_str_in_output: None,
             trace_decode_token_ids: None,
+            reasoning_end_str: None,
             inner: text_request.sampling_params,
         },
         stream,

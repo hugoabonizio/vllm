@@ -55,6 +55,7 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.sampling_params import (
     BeamSearchParams,
+    ReasoningEndStr,
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
@@ -278,6 +279,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
+    reasoning_end_str: ReasoningEndStr = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -817,6 +819,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
+            reasoning_end_str=self.reasoning_end_str,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
@@ -868,6 +871,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 parameter="stream_options",
             )
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_reasoning_end_str(cls, data):
+        if (
+            isinstance(data, dict)
+            and data.get("reasoning_end_str") is not None
+            and data.get("use_beam_search")
+        ):
+            raise VLLMValidationError(
+                "`reasoning_end_str` is not supported with beam search.",
+                parameter="reasoning_end_str",
+            )
         return data
 
     @model_validator(mode="before")

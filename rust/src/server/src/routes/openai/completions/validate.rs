@@ -39,6 +39,13 @@ pub(super) fn validate_request_compat(
         bail_invalid_request!(param = "prompt_embeds", "prompt_embeds is not supported.");
     }
 
+    if request.reasoning_end_str.is_some() {
+        bail_invalid_request!(
+            param = "reasoning_end_str",
+            "reasoning_end_str is not supported."
+        );
+    }
+
     if let Some(logprobs) = request.logprobs
         && logprobs < 0
         && logprobs != -1
@@ -158,6 +165,17 @@ mod tests {
                 "{stream_options}"
             );
         }
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_reasoning_end_str() {
+        let request = CompletionRequest {
+            reasoning_end_str: Some("Time to answer.</think>".to_string()),
+            ..base_request()
+        };
+        assert!(
+            validate_request_compat(&request, &served_names(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err()
+        );
     }
 
     #[test]

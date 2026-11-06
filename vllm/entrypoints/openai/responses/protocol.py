@@ -83,6 +83,7 @@ from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.sampling_params import (
+    ReasoningEndStr,
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
@@ -450,6 +451,7 @@ class ResponsesRequest(OpenAIBaseModel):
     stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
     thinking_token_budget: ThinkingTokenBudget = None
+    reasoning_end_str: ReasoningEndStr = None
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -648,6 +650,7 @@ class ResponsesRequest(OpenAIBaseModel):
             structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
             thinking_token_budget=self.thinking_token_budget,
+            reasoning_end_str=self.reasoning_end_str,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=skip_special_tokens,

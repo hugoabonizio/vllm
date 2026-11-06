@@ -48,6 +48,13 @@ pub(crate) fn validate_request_compat(
         );
     }
 
+    if request.sampling_params.reasoning_end_str.is_some() {
+        bail_invalid_request!(
+            param = "reasoning_end_str",
+            "reasoning_end_str is not supported."
+        );
+    }
+
     if request.token_ids.is_empty() {
         bail_invalid_request!(
             param = "token_ids",
@@ -205,6 +212,16 @@ mod tests {
                 "{trace_decode_token_ids}"
             );
         }
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_reasoning_end_str() {
+        let request: GenerateRequest = serde_json::from_value(json!({
+            "token_ids": [11, 22],
+            "sampling_params": {"reasoning_end_str": "Time to answer.</think>"},
+        }))
+        .expect("parse request");
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
     }
 
     #[test]
