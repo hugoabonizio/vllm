@@ -90,10 +90,13 @@ ThinkingTokenBudget = Annotated[
     BeforeValidator(validate_thinking_token_budget),
 ]
 
+MAX_REASONING_END_STR_CHARS = 1024
+"""Bound on `reasoning_end_str`, checked before it is tokenized."""
+
 ReasoningEndStr = Annotated[
     str | None,
     Field(
-        max_length=1024,
+        max_length=MAX_REASONING_END_STR_CHARS,
         description=(
             "Per-request override of the server's `reasoning_end_str` "
             "(`--reasoning-config`): the string forced when "
@@ -444,13 +447,6 @@ class SamplingParams(
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
-    reasoning_end_str: str | None = None
-    """Per-request override of `ReasoningConfig.reasoning_end_str`: the string
-    forced once `thinking_token_budget` is exhausted, e.g. a transition phrase
-    followed by the reasoning end marker. It must end with the reasoning
-    parser's end marker (e.g. `</think>`). Only takes effect together with
-    `thinking_token_budget`."""
-    _reasoning_end_token_ids: list[int] | None = None
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -472,6 +468,13 @@ class SamplingParams(
     """If provided, forces the engine to emit this predetermined sequence of
     token IDs during decoding instead of sampling randomly. Real logprobs are
     still computed. Conflict checking is performed at the engine level."""
+    reasoning_end_str: str | None = None
+    """Per-request override of `ReasoningConfig.reasoning_end_str`: the string
+    forced once `thinking_token_budget` is exhausted, e.g. a transition phrase
+    followed by the reasoning end marker. It must end with the reasoning
+    parser's end marker (e.g. `</think>`). Only takes effect together with
+    `thinking_token_budget`."""
+    _reasoning_end_token_ids: list[int] | None = None
 
     @staticmethod
     def from_optional(
@@ -489,7 +492,6 @@ class SamplingParams(
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
         thinking_token_budget: int | None = None,
-        reasoning_end_str: str | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -513,6 +515,7 @@ class SamplingParams(
         routed_experts_prompt_start: int = 0,
         # Debugging / RL-specific parameters.
         trace_decode_token_ids: list[int] | None = None,
+        reasoning_end_str: str | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -662,11 +665,13 @@ class SamplingParams(
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
             self._verify_extra_args()
-        if self.reasoning_end_str is not None and not self.reasoning_end_str:
+        if self.reasoning_end_str is not None and not (
+            0 < len(self.reasoning_end_str) <= MAX_REASONING_END_STR_CHARS
+        ):
             raise VLLMValidationError(
-                "reasoning_end_str must be a non-empty string.",
+                "reasoning_end_str must be a non-empty string of at most "
+                f"{MAX_REASONING_END_STR_CHARS} characters.",
                 parameter="reasoning_end_str",
-                value=self.reasoning_end_str,
             )
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(

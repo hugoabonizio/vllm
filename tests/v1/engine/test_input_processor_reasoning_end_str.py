@@ -70,6 +70,7 @@ def test_reasoning_end_str_requires_reasoning_config():
         _process(_processor(None), "Time to answer.</think>")
 
 
-def test_reasoning_end_str_rejects_empty_string():
-    with pytest.raises(VLLMValidationError, match="non-empty"):
-        SamplingParams(reasoning_end_str="")
+@pytest.mark.parametrize("reasoning_end_str", ["", "a" * 1024 + "</think>"])
+def test_reasoning_end_str_length_is_checked_before_tokenization(reasoning_end_str):
+    with pytest.raises(VLLMValidationError, match="non-empty string of at most"):
+        SamplingParams(reasoning_end_str=reasoning_end_str)

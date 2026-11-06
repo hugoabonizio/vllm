@@ -36,9 +36,11 @@ class ThinkingBudgetStateHolder:
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
-    """Detects the end of reasoning and is the default forced end sequence; a
-    request's ``reasoning_end_str`` overrides the forced sequence
-    (``state["end_token_ids"]``)."""
+    """Default forced end sequence; a request's ``reasoning_end_str`` overrides
+    it (``state["end_token_ids"]``)."""
+    natural_think_end_token_ids: list[int]
+    """Marker that detects the end of reasoning, as the reasoning parser
+    defines it; every forced sequence ends with it."""
 
     def __init__(
         self,
@@ -59,11 +61,14 @@ class ThinkingBudgetStateHolder:
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
+            self.natural_think_end_token_ids = []
         else:
             rs = reasoning_config.reasoning_start_token_ids
             re = reasoning_config.reasoning_end_token_ids
+            rn = reasoning_config.natural_reasoning_end_token_ids
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
+            self.natural_think_end_token_ids = rn if rn else self.think_end_token_ids
 
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -164,17 +169,14 @@ class ThinkingBudgetStateHolder:
         spec_lists = spec_token_ids or []
         return self._apply_forcing_to_logits(logits, predict_bonus_token, spec_lists)
 
-    def _find_last_end_index(
-        self, target_list: list[int], end_token_ids: list[int]
-    ) -> int:
-        """Last end of reasoning: the server's end sequence, or the request's
-        own forced sequence when it overrides it."""
-        last_end = self._find_last_sequence_index(target_list, self.think_end_token_ids)
-        if end_token_ids != self.think_end_token_ids:
-            last_end = max(
-                last_end, self._find_last_sequence_index(target_list, end_token_ids)
-            )
-        return last_end
+    @staticmethod
+    def _forced_prefix_len(token_ids: list[int], end_token_ids: list[int]) -> int:
+        """Longest proper prefix of the forced sequence that ``token_ids`` ends
+        with: how much of it was emitted before, e.g., a preemption."""
+        for prefix_len in range(min(len(end_token_ids) - 1, len(token_ids)), 0, -1):
+            if token_ids[-prefix_len:] == end_token_ids[:prefix_len]:
+                return prefix_len
+        return 0
 
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
@@ -200,15 +202,19 @@ class ThinkingBudgetStateHolder:
             countdown = thinking_token_budget
             continue_thinking = False
             in_end = False
+            end_count = 0
         else:
             start_thinking = -1
             countdown = thinking_token_budget
             continue_thinking = False
             in_end = False
+            end_count = 0
             last_start = self._find_last_sequence_index(
                 prompt_tok_ids, self.think_start_token_ids
             )
-            last_end = self._find_last_end_index(prompt_tok_ids, end_token_ids)
+            last_end = self._find_last_sequence_index(
+                prompt_tok_ids, self.natural_think_end_token_ids
+            )
             in_think = last_start > last_end
             # load metrics such as think count, start thinking
             # if request is in thinking mode, already
@@ -222,6 +228,8 @@ class ThinkingBudgetStateHolder:
                 # check if the token is exhausted within prompt
                 token_exhausted = thinking_token_budget - think_count
                 in_end = token_exhausted <= 0
+                if in_end:
+                    end_count = self._forced_prefix_len(prompt_tok_ids, end_token_ids)
             else:
                 think_count = 0
 
@@ -230,7 +238,7 @@ class ThinkingBudgetStateHolder:
             "in_end": in_end,
             "check_count_down": countdown,
             "think_count": think_count,
-            "end_count": 0,
+            "end_count": end_count,
             "prompt_tok_ids": prompt_tok_ids,
             "output_tok_ids": [],
             "thinking_token_budget": thinking_token_budget,
@@ -268,7 +276,9 @@ class ThinkingBudgetStateHolder:
         if state["end_thinking"] == -1:
             scan_offset = state.get("scan_offset", 0)
             output_slice = state.get("output_tok_ids", [])[scan_offset:]
-            end_thinking = self._find_last_end_index(output_slice, end_token_ids)
+            end_thinking = self._find_last_sequence_index(
+                output_slice, self.natural_think_end_token_ids
+            )
             if end_thinking >= 0:
                 end_thinking += scan_offset
             state["end_thinking"] = end_thinking
@@ -454,6 +464,12 @@ class ThinkingBudgetStateHolder:
 
                 elif remaining_budget <= 0:
                     state["force_index"] = [0]
+                    # Continue a sequence partially emitted before a preemption
+                    # instead of restarting it.
+                    history = output
+                    if len(history) < len(end_token_ids):
+                        history = (state.get("prompt_tok_ids") or []) + output
+                    state["end_count"] = self._forced_prefix_len(history, end_token_ids)
 
                 else:
                     # remaining_budget >= spec_len: all spec tokens are within

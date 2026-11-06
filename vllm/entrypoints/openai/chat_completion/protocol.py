@@ -875,6 +875,20 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_reasoning_end_str(cls, data):
+        if (
+            isinstance(data, dict)
+            and data.get("reasoning_end_str") is not None
+            and data.get("use_beam_search")
+        ):
+            raise VLLMValidationError(
+                "`reasoning_end_str` is not supported with beam search.",
+                parameter="reasoning_end_str",
+            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_logprobs(cls, data):
         if not isinstance(data, dict):
             return data
