@@ -1549,6 +1549,7 @@ class TestThinkingBudgetNaturalEndReentry:
 
         params = MagicMock()
         params.thinking_token_budget = budget
+        params.reasoning_end_token_ids = None
         batch_update = MagicMock(
             removed=[],
             added=[(0, params, None, [])],
@@ -1840,6 +1841,7 @@ class TestThinkingBudgetNaturalEndReentry:
         prompt_tok_ids = [self.THINK_START]
         params = MagicMock()
         params.thinking_token_budget = self.BUDGET
+        params.reasoning_end_token_ids = None
         batch_update = MagicMock(
             removed=[],
             added=[(0, params, prompt_tok_ids, [])],

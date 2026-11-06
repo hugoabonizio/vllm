@@ -430,6 +430,13 @@ class SamplingParams(
     skip_reading_prefix_cache: bool | None = None
     thinking_token_budget: int | None = None
     """Maximum number of tokens allowed for thinking operations."""
+    reasoning_end_str: str | None = None
+    """Per-request override of `ReasoningConfig.reasoning_end_str`: the string
+    forced once `thinking_token_budget` is exhausted, e.g. a transition phrase
+    followed by the reasoning end marker. It must end with the reasoning
+    parser's end marker (e.g. `</think>`). Only takes effect together with
+    `thinking_token_budget`."""
+    _reasoning_end_token_ids: list[int] | None = None
 
     repetition_detection: RepetitionDetectionParams | None = None
     """Parameters for detecting repetitive N-gram patterns in output tokens.
@@ -468,6 +475,7 @@ class SamplingParams(
         stop_token_ids: list[int] | None = None,
         bad_words: list[str] | None = None,
         thinking_token_budget: int | None = None,
+        reasoning_end_str: str | None = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: int | None = 16,
@@ -536,6 +544,7 @@ class SamplingParams(
             stop_token_ids=stop_token_ids,
             bad_words=bad_words,
             thinking_token_budget=thinking_token_budget,
+            reasoning_end_str=reasoning_end_str,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -639,6 +648,12 @@ class SamplingParams(
         _verify_num_sequences(self.n, "n")
         if self.extra_args:
             self._verify_extra_args()
+        if self.reasoning_end_str is not None and not self.reasoning_end_str:
+            raise VLLMValidationError(
+                "reasoning_end_str must be a non-empty string.",
+                parameter="reasoning_end_str",
+                value=self.reasoning_end_str,
+            )
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise VLLMValidationError(
                 f"presence_penalty must be in [-2, 2], got {self.presence_penalty}."
@@ -887,6 +902,14 @@ class SamplingParams(
     def bad_words_token_ids(self) -> list[list[int]] | None:
         # For internal use only. Backward compatibility not guaranteed
         return self._bad_words_token_ids
+
+    @property
+    def reasoning_end_token_ids(self) -> list[int] | None:
+        """Token IDs of `reasoning_end_str`, set by the input processor.
+
+        For internal use only. Backward compatibility not guaranteed.
+        """
+        return self._reasoning_end_token_ids
 
     @property
     def num_logprobs(self) -> int | None:
@@ -1463,6 +1486,7 @@ class SamplingParams(
             f"stop_token_ids={self.stop_token_ids}, "
             f"bad_words={self.bad_words}, "
             f"thinking_token_budget={self.thinking_token_budget}, "
+            f"reasoning_end_str={self.reasoning_end_str!r}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "

@@ -283,6 +283,17 @@ class CompletionRequest(OpenAIBaseModel):
             "-1 means unlimited (treated as unset)."
         ),
     )
+    reasoning_end_str: str | None = Field(
+        default=None,
+        description=(
+            "Per-request override of the server's `reasoning_end_str` "
+            "(`--reasoning-config`): the string forced when "
+            "`thinking_token_budget` is exhausted, e.g. a transition phrase "
+            "followed by the reasoning end marker. It must end with the "
+            "reasoning parser's end marker (e.g. `</think>`). Only takes "
+            "effect together with `thinking_token_budget`."
+        ),
+    )
 
     stream_interval: Annotated[int, Field(ge=1)] | None = Field(
         default=None,
@@ -432,6 +443,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            reasoning_end_str=self.reasoning_end_str,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
 

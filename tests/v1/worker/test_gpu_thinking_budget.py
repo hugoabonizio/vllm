@@ -311,3 +311,51 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
 
     assert out[0, END_B] == pytest.approx(1.0e9)
     assert out[0, END_A] == 0
+
+
+def test_v2_thinking_budget_uses_per_request_end_sequence():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    params = SamplingParams(thinking_token_budget=3)
+    params._reasoning_end_token_ids = [END_A, END_B, END]
+    state.add_request(3, params)
+    state.apply_staged_writes()
+
+    logits = torch.zeros((3, VOCAB_SIZE), device=DEVICE)
+    out = _apply(
+        state,
+        logits,
+        input_ids=[12, END_A, END_B],
+        local_pos=[0, 1, 2],
+    )
+
+    assert out[0, END_A] == pytest.approx(1.0e9)
+    assert out[1, END_B] == pytest.approx(1.0e9)
+    assert out[2, END] == pytest.approx(1.0e9)
+
+
+def test_v2_thinking_budget_reused_slot_restores_default_end_sequence():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    params = SamplingParams(thinking_token_budget=3)
+    params._reasoning_end_token_ids = [END_A, END_B, END]
+    state.add_request(3, params)
+    state.apply_staged_writes()
+    state.add_request(3, SamplingParams(thinking_token_budget=3))
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[12], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
+    assert out[0, END_A] == 0
+
+
+def test_v2_thinking_budget_rejects_oversized_end_sequence():
+    req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    params = SamplingParams(thinking_token_budget=3)
+    params._reasoning_end_token_ids = [END_A] * state.max_reasoning_end_len + [END]
+
+    with pytest.raises(ValueError, match="reasoning_end_str"):
+        state.add_request(3, params)

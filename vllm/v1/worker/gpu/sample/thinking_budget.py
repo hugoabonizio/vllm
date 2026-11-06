@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 
+from vllm.config.reasoning import MAX_REQUEST_REASONING_END_TOKENS
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
-from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
 from vllm.v1.worker.gpu.sample.logits_processor import LogitsContext
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -75,9 +76,18 @@ class ThinkingBudgetState:
         self.natural_reasoning_end_token_ids = torch.tensor(
             natural_end_ids, dtype=torch.int32, device=self.device
         )
-        self.reasoning_end_token_ids = torch.tensor(
-            end_ids, dtype=torch.int32, device=self.device
+        # Forced end sequence per request: the server default, or the request's
+        # `reasoning_end_str` override. Rows are only written for budgeted
+        # requests.
+        self.default_reasoning_end_token_ids = list(end_ids)
+        self.max_reasoning_end_len = max(len(end_ids), MAX_REQUEST_REASONING_END_TOKENS)
+        self.reasoning_end_token_ids = StagedWriteTensor(
+            (self.max_num_reqs, self.max_reasoning_end_len),
+            dtype=torch.int32,
+            device=self.device,
         )
+        self.reasoning_end_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        self._end_len_dirty = False
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> bool:
         if not self.enabled:
@@ -90,6 +100,19 @@ class ThinkingBudgetState:
         else:
             budget = min(budget, _INT32_MAX)
             self._reset_reqs.append(req_idx)
+            end_ids = (
+                sampling_params.reasoning_end_token_ids
+                or self.default_reasoning_end_token_ids
+            )
+            if len(end_ids) > self.max_reasoning_end_len:
+                raise ValueError(
+                    f"reasoning_end_str has {len(end_ids)} tokens; the "
+                    f"maximum is {self.max_reasoning_end_len}."
+                )
+            self.reasoning_end_token_ids.stage_write(req_idx, 0, end_ids)
+            if self.reasoning_end_len.np[req_idx] != len(end_ids):
+                self.reasoning_end_len.np[req_idx] = len(end_ids)
+                self._end_len_dirty = True
         if self.thinking_token_budget.np[req_idx] != budget:
             self.thinking_token_budget.np[req_idx] = budget
             self._budget_dirty = True
@@ -109,6 +132,10 @@ class ThinkingBudgetState:
         if self._budget_dirty:
             self.thinking_token_budget.copy_to_uva()
             self._budget_dirty = False
+        self.reasoning_end_token_ids.apply_write()
+        if self._end_len_dirty:
+            self.reasoning_end_len.copy_to_uva()
+            self._end_len_dirty = False
 
     def apply(self, logits: torch.Tensor, ctx: LogitsContext) -> None:
         idx_mapping_np = ctx.idx_mapping_np
@@ -129,7 +156,8 @@ class ThinkingBudgetState:
             self.cached_scan_pos,
             self.reasoning_start_token_ids,
             self.natural_reasoning_end_token_ids,
-            self.reasoning_end_token_ids,
+            self.reasoning_end_token_ids.gpu,
+            self.reasoning_end_len.gpu,
         )
 
 
@@ -266,9 +294,10 @@ def _thinking_budget_kernel(
     reasoning_start_token_ids_ptr,
     natural_reasoning_end_token_ids_ptr,
     reasoning_end_token_ids_ptr,
+    reasoning_end_token_ids_stride,
+    reasoning_end_len_ptr,
     START_LEN: tl.constexpr,
     NATURAL_END_LEN: tl.constexpr,
-    END_LEN: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
@@ -334,34 +363,38 @@ def _thinking_budget_kernel(
     if num_reasoning_tokens < budget:
         return
 
+    # The forced end sequence is per request (`reasoning_end_str` override).
+    end_ids_ptr = (
+        reasoning_end_token_ids_ptr + req_state_idx * reasoning_end_token_ids_stride
+    )
+    end_len = tl.load(reasoning_end_len_ptr + req_state_idx)
+
     # If the tail already ends with a prefix of the forced end sequence
     # (even from a resumed prompt), continue from the next marker token.
     end_prefix_len = 0
-    max_prefix_len = END_LEN - 1
+    max_prefix_len = end_len - 1
     if effective_len < max_prefix_len:
         max_prefix_len = effective_len
 
-    for prefix_len in tl.static_range(1, END_LEN):
-        if prefix_len <= max_prefix_len:
-            prefix_match = True
-            suffix_start = effective_len - prefix_len
-            for j in tl.static_range(0, END_LEN):
-                if j < prefix_len:
-                    expected = tl.load(reasoning_end_token_ids_ptr + j)
-                    actual = _load_effective_token(
-                        all_token_ids_ptr,
-                        all_token_ids_stride,
-                        input_ids_ptr,
-                        cur_req_first_pos,
-                        req_state_idx,
-                        total_len,
-                        suffix_start + j,
-                    )
-                    prefix_match = prefix_match & (actual == expected)
-            if prefix_match:
-                end_prefix_len = prefix_len
+    for prefix_len in range(1, max_prefix_len + 1):
+        prefix_match = 1
+        suffix_start = effective_len - prefix_len
+        for j in range(prefix_len):
+            expected = tl.load(end_ids_ptr + j)
+            actual = _load_effective_token(
+                all_token_ids_ptr,
+                all_token_ids_stride,
+                input_ids_ptr,
+                cur_req_first_pos,
+                req_state_idx,
+                total_len,
+                suffix_start + j,
+            )
+            prefix_match = prefix_match & (actual == expected)
+        if prefix_match:
+            end_prefix_len = prefix_len
 
-    force_token_id = tl.load(reasoning_end_token_ids_ptr + end_prefix_len)
+    force_token_id = tl.load(end_ids_ptr + end_prefix_len)
     tl.store(logits_ptr + token_idx * logits_stride + force_token_id, 1.0e9)
 
 
@@ -380,11 +413,11 @@ def apply_thinking_budget(
     reasoning_start_token_ids: torch.Tensor,
     natural_reasoning_end_token_ids: torch.Tensor,
     reasoning_end_token_ids: torch.Tensor,
+    reasoning_end_len: torch.Tensor,
 ) -> None:
     num_tokens = logits.shape[0]
     start_len = reasoning_start_token_ids.shape[0]
     natural_end_len = natural_reasoning_end_token_ids.shape[0]
-    end_len = reasoning_end_token_ids.shape[0]
 
     _update_committed_marker_cache_kernel[(req_ids.shape[0],)](
         req_ids,
@@ -418,7 +451,8 @@ def apply_thinking_budget(
         reasoning_start_token_ids,
         natural_reasoning_end_token_ids,
         reasoning_end_token_ids,
+        reasoning_end_token_ids.stride(0),
+        reasoning_end_len,
         START_LEN=start_len,
         NATURAL_END_LEN=natural_end_len,
-        END_LEN=end_len,
     )

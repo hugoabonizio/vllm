@@ -36,6 +36,12 @@ class ThinkingBudgetStateHolder:
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
+    """Default forced end sequence; a request's ``reasoning_end_str`` overrides
+    it per request (``state["end_token_ids"]``)."""
+    natural_think_end_token_ids: list[int]
+    """End marker that detects the end of reasoning, as the reasoning parser
+    defines it. Differs from the forced sequence when that one carries a
+    transition phrase."""
 
     def __init__(
         self,
@@ -56,11 +62,14 @@ class ThinkingBudgetStateHolder:
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
+            self.natural_think_end_token_ids = []
         else:
             rs = reasoning_config.reasoning_start_token_ids
             re = reasoning_config.reasoning_end_token_ids
+            rn = reasoning_config.natural_reasoning_end_token_ids
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
+            self.natural_think_end_token_ids = rn if rn else self.think_end_token_ids
 
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -91,7 +100,9 @@ class ThinkingBudgetStateHolder:
             thinking_token_budget = params.thinking_token_budget
             if thinking_token_budget is not None:
                 self._state[index] = self._init_state_entry(
-                    prompt_tok_ids, thinking_token_budget
+                    prompt_tok_ids,
+                    thinking_token_budget,
+                    params.reasoning_end_token_ids or self.think_end_token_ids,
                 )
                 self._state[index]["output_tok_ids"] = output_tok_ids
                 self._state[index]["spec_token_ids"] = []
@@ -169,7 +180,10 @@ class ThinkingBudgetStateHolder:
         return -1
 
     def _init_state_entry(
-        self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
+        self,
+        prompt_tok_ids: list[int] | None,
+        thinking_token_budget: int,
+        end_token_ids: list[int],
     ) -> dict[str, Any]:
         if prompt_tok_ids is None:
             last_start = -1
@@ -189,7 +203,7 @@ class ThinkingBudgetStateHolder:
                 prompt_tok_ids, self.think_start_token_ids
             )
             last_end = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_end_token_ids
+                prompt_tok_ids, self.natural_think_end_token_ids
             )
             in_think = last_start > last_end
             # load metrics such as think count, start thinking
@@ -216,6 +230,7 @@ class ThinkingBudgetStateHolder:
             "prompt_tok_ids": prompt_tok_ids,
             "output_tok_ids": [],
             "thinking_token_budget": thinking_token_budget,
+            "end_token_ids": end_token_ids,
             "prev_output_length": 0,
             "spec_token_ids": [],
             "force_index": [],
@@ -230,7 +245,8 @@ class ThinkingBudgetStateHolder:
     def _update_think_state(self, state: dict[str, Any]) -> None:
         if state.get("thinking_token_budget", -1) == -1:
             return
-        if len(self.think_end_token_ids) == 0:
+        end_token_ids = state["end_token_ids"]
+        if len(end_token_ids) == 0:
             state["thinking_token_budget"] = -1
             state["in_end"] = False
             state["force_index"] = []
@@ -249,7 +265,7 @@ class ThinkingBudgetStateHolder:
             scan_offset = state.get("scan_offset", 0)
             output_slice = state.get("output_tok_ids", [])[scan_offset:]
             end_thinking = self._find_last_sequence_index(
-                output_slice, self.think_end_token_ids
+                output_slice, self.natural_think_end_token_ids
             )
             if end_thinking >= 0:
                 end_thinking += scan_offset
@@ -356,9 +372,7 @@ class ThinkingBudgetStateHolder:
         # eg with 999: [2,4,5,999] -> [3,-1,-1,-1]
         if state["in_end"] and state["end_count"] == 0:
             new_tokens = output[prev_length:]
-            stopping_thinking = (
-                self.think_end_token_ids[state["end_count"]] in new_tokens
-            )
+            stopping_thinking = end_token_ids[state["end_count"]] in new_tokens
             if not stopping_thinking:
                 state["in_think"] = True
                 state["in_end"] = False
@@ -448,8 +462,8 @@ class ThinkingBudgetStateHolder:
             state["force_index"] = []
             if len(state["spec_token_ids"]) > 0:
                 for i, token_id in enumerate(state["spec_token_ids"]):
-                    if state["end_count"] + 1 < len(self.think_end_token_ids):
-                        if token_id == self.think_end_token_ids[state["end_count"] + 1]:
+                    if state["end_count"] + 1 < len(end_token_ids):
+                        if token_id == end_token_ids[state["end_count"] + 1]:
                             state["end_count"] += 1
                         else:
                             state["end_count"] += 1
@@ -463,7 +477,7 @@ class ThinkingBudgetStateHolder:
             else:
                 state["end_count"] += 1
                 state["force_index"] = [0]
-            if state["end_count"] >= len(self.think_end_token_ids):
+            if state["end_count"] >= len(end_token_ids):
                 state.update(
                     {
                         "in_end": False,
@@ -532,17 +546,16 @@ class ThinkingBudgetStateHolder:
                     if len(force_index) == 0:
                         continue
                     end_count = state.get("end_count", 0)
+                    end_token_ids = state["end_token_ids"]
                     for force_idx in force_index:
-                        if end_count < len(self.think_end_token_ids):
+                        if end_count < len(end_token_ids):
                             mask_idx = self.cu_num_tokens[seq_idx] + force_idx
                             if (
                                 mask_idx < self._mask_capacity
                                 and mask_idx < logits.shape[0]
                             ):
                                 active_indices_cpu.append(mask_idx)
-                                force_tokens_cpu.append(
-                                    self.think_end_token_ids[end_count]
-                                )
+                                force_tokens_cpu.append(end_token_ids[end_count])
                             if predict_bonus_token:
                                 if state["end_count"] > 0:
                                     state["bonus_token_forced"] = False

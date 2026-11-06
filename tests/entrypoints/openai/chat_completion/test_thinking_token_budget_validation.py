@@ -74,3 +74,42 @@ def test_completion_request_accepts_minus_one_as_unlimited():
         }
     )
     assert request.thinking_token_budget is None
+
+
+def test_chat_completion_request_passes_reasoning_end_str():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hello"}],
+            "thinking_token_budget": 10,
+            "reasoning_end_str": "Time to answer.</think>",
+        }
+    )
+    params = request.to_sampling_params(max_tokens=16, default_sampling_params={})
+    assert params.thinking_token_budget == 10
+    assert params.reasoning_end_str == "Time to answer.</think>"
+
+
+def test_completion_request_passes_reasoning_end_str():
+    request = CompletionRequest.model_validate(
+        {
+            "model": "qwen",
+            "prompt": "hello",
+            "thinking_token_budget": 5,
+            "reasoning_end_str": "Time to answer.</think>",
+        }
+    )
+    params = request.to_sampling_params(max_tokens=16)
+    assert params.reasoning_end_str == "Time to answer.</think>"
+
+
+def test_empty_reasoning_end_str_is_rejected():
+    request = ChatCompletionRequest.model_validate(
+        {
+            "model": "qwen",
+            "messages": [{"role": "user", "content": "hello"}],
+            "reasoning_end_str": "",
+        }
+    )
+    with pytest.raises(VLLMValidationError, match="reasoning_end_str"):
+        request.to_sampling_params(max_tokens=16, default_sampling_params={})

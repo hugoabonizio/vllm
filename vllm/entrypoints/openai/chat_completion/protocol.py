@@ -278,6 +278,17 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
+    reasoning_end_str: str | None = Field(
+        default=None,
+        description=(
+            "Per-request override of the server's `reasoning_end_str` "
+            "(`--reasoning-config`): the string forced when "
+            "`thinking_token_budget` is exhausted, e.g. a transition phrase "
+            "followed by the reasoning end marker. It must end with the "
+            "reasoning parser's end marker (e.g. `</think>`). Only takes "
+            "effect together with `thinking_token_budget`."
+        ),
+    )
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 
@@ -817,6 +828,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             thinking_token_budget=self.thinking_token_budget,
+            reasoning_end_str=self.reasoning_end_str,
             allowed_token_ids=self.allowed_token_ids,
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
