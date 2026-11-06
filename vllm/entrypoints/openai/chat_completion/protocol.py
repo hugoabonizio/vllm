@@ -55,6 +55,7 @@ from vllm.renderers.chat_utils import (
 )
 from vllm.sampling_params import (
     BeamSearchParams,
+    ReasoningEndStr,
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
@@ -278,17 +279,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ),
     )
     thinking_token_budget: ThinkingTokenBudget = None
-    reasoning_end_str: str | None = Field(
-        default=None,
-        description=(
-            "Per-request override of the server's `reasoning_end_str` "
-            "(`--reasoning-config`): the string forced when "
-            "`thinking_token_budget` is exhausted, e.g. a transition phrase "
-            "followed by the reasoning end marker. It must end with the "
-            "reasoning parser's end marker (e.g. `</think>`). Only takes "
-            "effect together with `thinking_token_budget`."
-        ),
-    )
+    reasoning_end_str: ReasoningEndStr = None
     include_reasoning: bool = True
     parallel_tool_calls: bool | None = True
 

@@ -219,16 +219,6 @@ class InputProcessor:
                     "not configured. Please set --reasoning-parser "
                     "and/or --reasoning-config to use thinking_token_budget."
                 )
-            if params.reasoning_end_str is not None and (
-                self.vllm_config.reasoning_config is None
-                or not self.vllm_config.reasoning_config.enabled
-            ):
-                raise VLLMValidationError(
-                    "reasoning_end_str is set but reasoning_config is "
-                    "not configured. Please set --reasoning-parser "
-                    "and/or --reasoning-config to use reasoning_end_str.",
-                    parameter="reasoning_end_str",
-                )
             if (
                 params.trace_decode_token_ids
                 and not self.model_config.enable_trace_replay
@@ -275,49 +265,68 @@ class InputProcessor:
         """Tokenize a per-request `reasoning_end_str` on request-local params.
 
         The forced sequence must end with the reasoning parser's natural end
-        marker and contain it only there: the thinking-budget samplers stop
-        forcing once they see that marker, and the reasoning parser splits
-        reasoning from content on it.
+        marker and contain no other reasoning marker: the thinking-budget
+        samplers stop forcing once they see the end marker (and restart the
+        budget on a start marker), and the reasoning parser splits reasoning
+        from content on the end marker.
         """
         reasoning_end_str = sampling_params.reasoning_end_str
         assert reasoning_end_str is not None
         reasoning_config = self.vllm_config.reasoning_config
-        # Presence is checked in _validate_params.
-        assert reasoning_config is not None
-        if self.tokenizer is None:
+        if reasoning_config is None or not reasoning_config.enabled:
             raise VLLMValidationError(
-                "reasoning_end_str requires a tokenizer and cannot be used "
-                "with skip_tokenizer_init=True.",
+                "reasoning_end_str is set but reasoning_config is not "
+                "configured. Please set --reasoning-parser and/or "
+                "--reasoning-config to use reasoning_end_str.",
                 parameter="reasoning_end_str",
             )
-        token_ids = self.tokenizer.encode(reasoning_end_str, add_special_tokens=False)
-        if len(token_ids) > MAX_REQUEST_REASONING_END_TOKENS:
-            raise VLLMValidationError(
-                f"reasoning_end_str tokenizes to {len(token_ids)} tokens; the "
-                f"maximum is {MAX_REQUEST_REASONING_END_TOKENS}.",
+        # An enabled reasoning config implies the tokenizer was initialized.
+        assert self.tokenizer is not None
+
+        def invalid(reason: str) -> VLLMValidationError:
+            return VLLMValidationError(
+                f"reasoning_end_str {reason}",
                 parameter="reasoning_end_str",
                 value=reasoning_end_str,
             )
 
+        token_ids = self.tokenizer.encode(reasoning_end_str, add_special_tokens=False)
+        if len(token_ids) > MAX_REQUEST_REASONING_END_TOKENS:
+            raise invalid(
+                f"tokenizes to {len(token_ids)} tokens; the maximum is "
+                f"{MAX_REQUEST_REASONING_END_TOKENS}."
+            )
+        vocab_size = self.model_config.get_vocab_size()
+        if any(not 0 <= t < vocab_size for t in token_ids):
+            raise invalid(
+                f"contains token ids outside the model vocabulary (size {vocab_size})."
+            )
+
+        def find(marker: list[int]) -> int:
+            n = len(marker)
+            return next(
+                (
+                    i
+                    for i in range(len(token_ids) - n + 1)
+                    if token_ids[i : i + n] == marker
+                ),
+                -1,
+            )
+
         natural_end = reasoning_config.natural_reasoning_end_token_ids or []
-        end_len = len(natural_end)
-        first_end = next(
-            (
-                i
-                for i in range(len(token_ids) - end_len + 1)
-                if token_ids[i : i + end_len] == natural_end
-            ),
-            -1,
-        )
-        if not natural_end or first_end < 0 or first_end != len(token_ids) - end_len:
-            natural_end_str = self.tokenizer.decode(natural_end)
-            raise VLLMValidationError(
-                "reasoning_end_str must end with the reasoning end marker "
-                f"{natural_end_str!r} and contain it only once, compared as "
-                "tokens. If the marker merges with the preceding text when "
-                "tokenized, separate them with whitespace.",
-                parameter="reasoning_end_str",
-                value=reasoning_end_str,
+        first_end = find(natural_end)
+        if first_end < 0 or first_end != len(token_ids) - len(natural_end):
+            raise invalid(
+                "must end with the reasoning end marker "
+                f"{self.tokenizer.decode(natural_end)!r} and contain it only "
+                "once, compared as tokens. If the marker merges with the "
+                "preceding text when tokenized, separate them with whitespace."
+            )
+        start_marker = reasoning_config.reasoning_start_token_ids or []
+        if start_marker and find(start_marker) >= 0:
+            raise invalid(
+                "must not contain the reasoning start marker "
+                f"{self.tokenizer.decode(start_marker)!r}."
             )
         sampling_params._reasoning_end_token_ids = token_ids
 

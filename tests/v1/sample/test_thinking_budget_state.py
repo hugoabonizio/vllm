@@ -96,7 +96,6 @@ END = 200
 PHRASE_A = 201
 PHRASE_B = 202
 THINK = 60
-CONTENT = 50
 VOCAB_SIZE = 256
 
 
@@ -152,27 +151,3 @@ def test_per_request_reasoning_end_str_overrides_forced_sequence():
     assert override_out[:7] == [START, THINK, THINK, THINK, PHRASE_A, PHRASE_B, END]
     # Forcing stops once the end sequence is complete.
     assert override_out[7] == THINK
-
-
-def test_natural_end_detected_when_forced_sequence_has_transition_phrase():
-    """A bare natural end marker ends reasoning even though the forced
-    sequence carries a transition phrase, so the phrase is never injected
-    into the answer once the budget would have run out."""
-    holder = ThinkingBudgetStateHolder(
-        create_mock_reasoning_config(
-            [START], [PHRASE_A, PHRASE_B, END], natural_end_token_ids=[END]
-        ),
-        8,
-        0,
-        torch.device("cpu"),
-        False,
-    )
-
-    (output,) = _generate(
-        holder,
-        [SamplingParams(thinking_token_budget=4)],
-        [[START, THINK, THINK, END] + [CONTENT] * 12],
-        num_steps=14,
-    )
-
-    assert output == [START, THINK, THINK, END] + [CONTENT] * 10

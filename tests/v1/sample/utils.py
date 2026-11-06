@@ -17,17 +17,12 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 
 def create_mock_reasoning_config(
-    start_token_ids: list[int],
-    end_token_ids: list[int],
-    natural_end_token_ids: list[int] | None = None,
+    start_token_ids: list[int], end_token_ids: list[int]
 ) -> ReasoningConfig:
     return MagicMock(
         spec=ReasoningConfig,
         reasoning_start_token_ids=start_token_ids,
         reasoning_end_token_ids=end_token_ids,
-        natural_reasoning_end_token_ids=(
-            end_token_ids if natural_end_token_ids is None else natural_end_token_ids
-        ),
     )
 
 

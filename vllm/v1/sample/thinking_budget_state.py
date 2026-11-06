@@ -36,12 +36,9 @@ class ThinkingBudgetStateHolder:
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
-    """Default forced end sequence; a request's ``reasoning_end_str`` overrides
-    it per request (``state["end_token_ids"]``)."""
-    natural_think_end_token_ids: list[int]
-    """End marker that detects the end of reasoning, as the reasoning parser
-    defines it. Differs from the forced sequence when that one carries a
-    transition phrase."""
+    """Detects the end of reasoning and is the default forced end sequence; a
+    request's ``reasoning_end_str`` overrides the forced sequence
+    (``state["end_token_ids"]``)."""
 
     def __init__(
         self,
@@ -62,14 +59,11 @@ class ThinkingBudgetStateHolder:
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
-            self.natural_think_end_token_ids = []
         else:
             rs = reasoning_config.reasoning_start_token_ids
             re = reasoning_config.reasoning_end_token_ids
-            rn = reasoning_config.natural_reasoning_end_token_ids
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
-            self.natural_think_end_token_ids = rn if rn else self.think_end_token_ids
 
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -203,7 +197,7 @@ class ThinkingBudgetStateHolder:
                 prompt_tok_ids, self.think_start_token_ids
             )
             last_end = self._find_last_sequence_index(
-                prompt_tok_ids, self.natural_think_end_token_ids
+                prompt_tok_ids, self.think_end_token_ids
             )
             in_think = last_start > last_end
             # load metrics such as think count, start thinking
@@ -265,7 +259,7 @@ class ThinkingBudgetStateHolder:
             scan_offset = state.get("scan_offset", 0)
             output_slice = state.get("output_tok_ids", [])[scan_offset:]
             end_thinking = self._find_last_sequence_index(
-                output_slice, self.natural_think_end_token_ids
+                output_slice, self.think_end_token_ids
             )
             if end_thinking >= 0:
                 end_thinking += scan_offset

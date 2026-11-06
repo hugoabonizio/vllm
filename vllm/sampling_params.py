@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 
 import msgspec
 import numpy as np
-from pydantic import BeforeValidator, GetPydanticSchema, StrictInt
+from pydantic import BeforeValidator, Field, GetPydanticSchema, StrictInt
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -88,6 +88,19 @@ def validate_thinking_token_budget(value: int | float | bool | None) -> int | No
 ThinkingTokenBudget = Annotated[
     int | None,
     BeforeValidator(validate_thinking_token_budget),
+]
+
+ReasoningEndStr = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Per-request override of the server's `reasoning_end_str` "
+            "(`--reasoning-config`): the string forced when "
+            "`thinking_token_budget` is exhausted, e.g. a transition phrase "
+            "followed by the reasoning end marker (e.g. `</think>`), which it "
+            "must end with. Only takes effect with `thinking_token_budget`."
+        ),
+    ),
 ]
 
 

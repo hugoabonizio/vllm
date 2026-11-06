@@ -356,9 +356,9 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
-The field is accepted by the Chat Completions, Completions and Responses APIs, and offline as `SamplingParams(thinking_token_budget=10, reasoning_end_str=...)`. It requires the server to be started with `--reasoning-parser` and/or `--reasoning-config`, and it only takes effect together with `thinking_token_budget`.
+The field is accepted by the Chat Completions, Completions, Responses and Anthropic Messages APIs, and offline as `SamplingParams(thinking_token_budget=10, reasoning_end_str=...)`. It only takes effect together with `thinking_token_budget`.
 
-The string must end with the reasoning parser's end marker (e.g. `</think>`) and must not contain it earlier, compared as tokens. Otherwise, the request is rejected: vLLM stops forcing as soon as it sees that marker, and the reasoning parser splits reasoning from content on it. The string may tokenize to at most 128 tokens.
+The string must end with the reasoning end marker (e.g. `</think>`), must not contain that marker earlier or contain the reasoning start marker (compared as tokens), and may tokenize to at most 128 tokens. Otherwise, the request is rejected: vLLM stops forcing as soon as it sees the end marker, and the reasoning parser splits reasoning from content on it. The end marker comes from `--reasoning-parser`. Without a parser, the end marker is the server's whole `reasoning_end_str`, so per-request strings can only add text before it.
 
 ## Automatic `enable_thinking` Activation
 

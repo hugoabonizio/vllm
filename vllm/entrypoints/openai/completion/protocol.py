@@ -30,6 +30,7 @@ from vllm.outputs import WeightVersionSpan
 from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
+    ReasoningEndStr,
     RepetitionDetectionParams,
     RequestOutputKind,
     SamplingParams,
@@ -283,17 +284,7 @@ class CompletionRequest(OpenAIBaseModel):
             "-1 means unlimited (treated as unset)."
         ),
     )
-    reasoning_end_str: str | None = Field(
-        default=None,
-        description=(
-            "Per-request override of the server's `reasoning_end_str` "
-            "(`--reasoning-config`): the string forced when "
-            "`thinking_token_budget` is exhausted, e.g. a transition phrase "
-            "followed by the reasoning end marker. It must end with the "
-            "reasoning parser's end marker (e.g. `</think>`). Only takes "
-            "effect together with `thinking_token_budget`."
-        ),
-    )
+    reasoning_end_str: ReasoningEndStr = None
 
     stream_interval: Annotated[int, Field(ge=1)] | None = Field(
         default=None,
