@@ -98,6 +98,11 @@ pub(super) fn validate_request_compat(
         "mm_processor_kwargs",
         "mm_processor_kwargs is not supported.",
     )?;
+    reject_non_default(
+        request.reasoning_end_str.as_ref(),
+        "reasoning_end_str",
+        "reasoning_end_str is not supported.",
+    )?;
 
     Ok(())
 }
@@ -299,6 +304,15 @@ mod tests {
 
         let request = ChatCompletionRequest {
             length_penalty: Some(2.0),
+            ..base_request()
+        };
+        assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());
+    }
+
+    #[test]
+    fn validate_request_compat_rejects_reasoning_end_str() {
+        let request = ChatCompletionRequest {
+            reasoning_end_str: Some("Time to answer.</think>".to_string()),
             ..base_request()
         };
         assert!(validate_request_compat(&request, &served(&["Qwen/Qwen1.5-0.5B-Chat"])).is_err());

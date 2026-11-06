@@ -43,8 +43,8 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_echo.py
   - pytest -v -s entrypoints/openai/chat_completion/test_logprob_token_ids.py
-  # The Qwen3.5-35B FP8 MTP case needs two GPUs.
-  - pytest -v -s entrypoints/openai/chat_completion/test_thinking_token_budget.py -k "not qwen35"
+  # The Qwen3.5-35B FP8 MTP case needs two GPUs. The Rust frontend rejects reasoning_end_str.
+  - pytest -v -s entrypoints/openai/chat_completion/test_thinking_token_budget.py -k "not qwen35 and not per_request_reasoning_end_str"
   # The Rust frontend drops prompt_tokens_details when nothing was cached, rejects batched
   # prompts, and supports only n=1 (so no parallel sampling or beam search).
   - pytest -v -s entrypoints/openai/completion/test_completion.py -k "not test_single_completion and not test_prompt_logprobs_completion and not test_parallel and not test_batch_completions"

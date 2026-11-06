@@ -381,14 +381,15 @@ def _thinking_budget_kernel(
     if effective_len < max_prefix_len:
         max_prefix_len = effective_len
     if max_prefix_len > 0:
-        # Load the last END_BLOCK effective tokens at once: the committed
-        # history may live in host memory (UVA).
+        # Load the last max_prefix_len effective tokens at once, right-aligned
+        # in END_BLOCK lanes: the committed history may live in host memory.
         offs = tl.arange(0, END_BLOCK)
         pos = effective_len - END_BLOCK + offs
-        from_history = (pos >= 0) & (pos < total_len)
-        from_input = pos >= total_len
+        in_tail = offs >= END_BLOCK - max_prefix_len
+        from_history = in_tail & (pos < total_len)
+        from_input = in_tail & (pos >= total_len)
         tail = tl.load(
-            all_token_ids_ptr + req_state_idx * all_token_ids_stride + pos,
+            all_token_ids_ptr + req_state_idx.to(tl.int64) * all_token_ids_stride + pos,
             mask=from_history,
             other=-1,
         )

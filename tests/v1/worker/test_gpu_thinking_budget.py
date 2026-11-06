@@ -316,8 +316,9 @@ def test_v2_thinking_budget_continues_end_prefix_from_prompt():
 def test_v2_thinking_budget_uses_per_request_end_sequence():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     state = ThinkingBudgetState(req_states, MockReasoningConfig())
-    params = SamplingParams(thinking_token_budget=3)
-    params._reasoning_end_token_ids = [END_A, END_B, END]
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[END_A, END_B, END]
+    )
     state.add_request(3, params)
     state.apply_staged_writes()
 
@@ -337,8 +338,9 @@ def test_v2_thinking_budget_uses_per_request_end_sequence():
 def test_v2_thinking_budget_reused_slot_restores_default_end_sequence():
     req_states = _make_req_states([1, START, 10, 11, 12], prompt_len=1)
     state = ThinkingBudgetState(req_states, MockReasoningConfig())
-    params = SamplingParams(thinking_token_budget=3)
-    params._reasoning_end_token_ids = [END_A, END_B, END]
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[END_A, END_B, END]
+    )
     state.add_request(3, params)
     state.apply_staged_writes()
     state.add_request(3, SamplingParams(thinking_token_budget=3))
@@ -366,8 +368,9 @@ def test_v2_thinking_budget_mixed_end_sequences_in_one_batch():
     idx2 = req_states.req_id_to_index["req2"]
     phrase = list(range(20, 60))
     state = ThinkingBudgetState(req_states, MockReasoningConfig())
-    params = SamplingParams(thinking_token_budget=3)
-    params._reasoning_end_token_ids = [*phrase, END]
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[*phrase, END]
+    )
     state.add_request(idx1, params)
     state.add_request(idx2, SamplingParams(thinking_token_budget=3))
     state.apply_staged_writes()
@@ -400,3 +403,25 @@ def test_v2_thinking_budget_mixed_end_sequences_in_one_batch():
     assert out[2, phrase[2]] == pytest.approx(1.0e9)
     assert out[3, END] == pytest.approx(1.0e9)
     assert torch.count_nonzero(out) == 4
+
+
+def test_v2_thinking_budget_continues_longest_end_sequence_past_window_start():
+    """A max-length end sequence nearly complete after a long history: only the
+    longest prefix (127 tokens) continues, from the window's last lanes."""
+    phrase = [20 + i % 60 for i in range(127)]
+    tokens = [1, START, *([10] * 130), *phrase]
+    req_states = _make_req_states(tokens, prompt_len=1)
+    state = ThinkingBudgetState(req_states, MockReasoningConfig())
+    state.add_request(
+        3,
+        SamplingParams(
+            thinking_token_budget=3, _reasoning_end_token_ids=[*phrase, END]
+        ),
+    )
+    state.apply_staged_writes()
+
+    logits = torch.zeros((1, VOCAB_SIZE), device=DEVICE)
+    out = _apply(state, logits, input_ids=[phrase[-1]], local_pos=[0])
+
+    assert out[0, END] == pytest.approx(1.0e9)
+    assert torch.count_nonzero(out) == 1

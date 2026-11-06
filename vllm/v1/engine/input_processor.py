@@ -319,8 +319,7 @@ class InputProcessor:
             raise invalid(
                 "must end with the reasoning end marker "
                 f"{self.tokenizer.decode(natural_end)!r} and contain it only "
-                "once, compared as tokens. If the marker merges with the "
-                "preceding text when tokenized, separate them with whitespace."
+                "once, compared as tokens."
             )
         start_marker = reasoning_config.reasoning_start_token_ids or []
         if start_marker and find(start_marker) >= 0:

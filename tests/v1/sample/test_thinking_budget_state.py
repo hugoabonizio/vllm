@@ -95,6 +95,7 @@ START = 100
 END = 200
 PHRASE_A = 201
 PHRASE_B = 202
+OVERRIDE = 203
 THINK = 60
 VOCAB_SIZE = 256
 
@@ -104,9 +105,14 @@ def _generate(
     params: list[SamplingParams],
     scripted: list[list[int]],
     num_steps: int,
+    outputs: list[list[int]] | None = None,
 ) -> list[list[int]]:
-    """Greedily decode: take a forced token if any, else the scripted token."""
-    outputs: list[list[int]] = [[] for _ in params]
+    """Greedily decode: take a forced token if any, else the scripted token.
+
+    `outputs` holds tokens generated before a preemption, for resumed requests.
+    """
+    if outputs is None:
+        outputs = [[] for _ in params]
     holder.sync_batch(
         BatchUpdate(
             batch_size=len(params),
@@ -136,8 +142,9 @@ def test_per_request_reasoning_end_str_overrides_forced_sequence():
         torch.device("cpu"),
         False,
     )
-    override = SamplingParams(thinking_token_budget=3)
-    override._reasoning_end_token_ids = [PHRASE_A, PHRASE_B, END]
+    override = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[PHRASE_A, PHRASE_B, END]
+    )
     thinking = [START] + [THINK] * 10
 
     default_out, override_out = _generate(
@@ -151,3 +158,23 @@ def test_per_request_reasoning_end_str_overrides_forced_sequence():
     assert override_out[:7] == [START, THINK, THINK, THINK, PHRASE_A, PHRASE_B, END]
     # Forcing stops once the end sequence is complete.
     assert override_out[7] == THINK
+
+
+def test_resumed_request_does_not_force_its_end_sequence_again():
+    """A request resumed after its override was forced must not force it
+    again, even though the server's end sequence never appeared."""
+    holder = ThinkingBudgetStateHolder(
+        create_mock_reasoning_config([START], [PHRASE_A, PHRASE_B, END]),
+        8,
+        0,
+        torch.device("cpu"),
+        False,
+    )
+    resumed = [START, THINK, THINK, THINK, OVERRIDE, END, THINK]
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[OVERRIDE, END]
+    )
+
+    (output,) = _generate(holder, [params], [[]], num_steps=4, outputs=[list(resumed)])
+
+    assert output[len(resumed) :] == [THINK] * 4

@@ -277,8 +277,9 @@ def test_cpu_thinking_budget_uses_per_request_end_sequence() -> None:
     req_states = _make_req_states([1, START, 10, 11, 12])
     req_idx = req_states.req_id_to_index["req"]
     state = CPUThinkingBudgetState(req_states, ReasoningConfig())
-    params = SamplingParams(thinking_token_budget=3)
-    params._reasoning_end_token_ids = [END_A, END_B, END]
+    params = SamplingParams(
+        thinking_token_budget=3, _reasoning_end_token_ids=[END_A, END_B, END]
+    )
     state.add_request(req_idx, params)
 
     logits = torch.zeros((3, VOCAB_SIZE))

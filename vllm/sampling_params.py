@@ -93,6 +93,7 @@ ThinkingTokenBudget = Annotated[
 ReasoningEndStr = Annotated[
     str | None,
     Field(
+        max_length=1024,
         description=(
             "Per-request override of the server's `reasoning_end_str` "
             "(`--reasoning-config`): the string forced when "

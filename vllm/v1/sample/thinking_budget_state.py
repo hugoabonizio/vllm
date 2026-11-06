@@ -164,6 +164,18 @@ class ThinkingBudgetStateHolder:
         spec_lists = spec_token_ids or []
         return self._apply_forcing_to_logits(logits, predict_bonus_token, spec_lists)
 
+    def _find_last_end_index(
+        self, target_list: list[int], end_token_ids: list[int]
+    ) -> int:
+        """Last end of reasoning: the server's end sequence, or the request's
+        own forced sequence when it overrides it."""
+        last_end = self._find_last_sequence_index(target_list, self.think_end_token_ids)
+        if end_token_ids != self.think_end_token_ids:
+            last_end = max(
+                last_end, self._find_last_sequence_index(target_list, end_token_ids)
+            )
+        return last_end
+
     @staticmethod
     def _find_last_sequence_index(target_list: list[int], token_ids: list[int]) -> int:
         if not token_ids:
@@ -196,9 +208,7 @@ class ThinkingBudgetStateHolder:
             last_start = self._find_last_sequence_index(
                 prompt_tok_ids, self.think_start_token_ids
             )
-            last_end = self._find_last_sequence_index(
-                prompt_tok_ids, self.think_end_token_ids
-            )
+            last_end = self._find_last_end_index(prompt_tok_ids, end_token_ids)
             in_think = last_start > last_end
             # load metrics such as think count, start thinking
             # if request is in thinking mode, already
@@ -258,9 +268,7 @@ class ThinkingBudgetStateHolder:
         if state["end_thinking"] == -1:
             scan_offset = state.get("scan_offset", 0)
             output_slice = state.get("output_tok_ids", [])[scan_offset:]
-            end_thinking = self._find_last_sequence_index(
-                output_slice, self.think_end_token_ids
-            )
+            end_thinking = self._find_last_end_index(output_slice, end_token_ids)
             if end_thinking >= 0:
                 end_thinking += scan_offset
             state["end_thinking"] = end_thinking
