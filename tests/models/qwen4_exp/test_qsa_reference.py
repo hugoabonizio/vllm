@@ -1284,6 +1284,126 @@ def test_qsa_sparse_paged_attention_correctness(
 @requires_qsa_kernels
 @pytest.mark.skipif(
     not current_platform.is_device_capability_family(100),
+    reason="masked-dense QSA prefill runs FA4 on sm_100/sm_103",
+)
+# (cached prefix, new rows): a decode, a short prefill left to the sparse
+# kernel, a fresh prefill past the selection budget and a chunked prefill,
+# whose rows are one run, then split. Per-rank heads at TP1 and TP4.
+@pytest.mark.parametrize(
+    "requests, heads, kv_heads",
+    [
+        pytest.param(
+            [(5000, 4), (0, 300), (0, 3000), (2500, 1500)], 24, 2, id="tp1_contiguous"
+        ),
+        pytest.param(
+            [(5000, 4), (0, 3000), (0, 300), (2500, 1500)], 6, 1, id="tp4_split"
+        ),
+    ],
+)
+def test_qsa_masked_prefill_matches_sparse_attention(
+    requests: list[tuple[int, int]], heads: int, kv_heads: int
+) -> None:
+    """Masked-dense FA4 prefill writes what the sparse kernel writes and
+    leaves the selections intact."""
+    from vllm.models.qwen4_exp.nvidia.ops.qsa_masked_prefill import plan_masked_prefill
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAImpl
+
+    torch.manual_seed(0)
+    head_dim, page_size = 256, 1600
+    budget, ratio = 2048, 4
+    pages = 6
+    query_lens = torch.tensor([n for _, n in requests])
+    seq_lens = torch.tensor([p + n for p, n in requests], dtype=torch.int32)
+    query_start_loc = torch.zeros(len(requests) + 1, dtype=torch.int32)
+    query_start_loc[1:] = query_lens.cumsum(0)
+    num_rows = int(query_lens.sum())
+    token_to_req = torch.repeat_interleave(
+        torch.arange(len(requests), dtype=torch.int32), query_lens
+    ).cuda()
+    positions = torch.cat([torch.arange(p, p + n) for p, n in requests]).cuda()
+
+    q = torch.randn(num_rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    output_gate = torch.randn_like(q)
+    num_blocks = len(requests) * pages
+    kv_rows = torch.randn(
+        num_blocks, page_size, kv_heads, 2 * head_dim, device="cuda"
+    ).to(torch.bfloat16)
+    kv_cache = kv_rows.transpose(1, 2)  # QSAImpl's view
+    block_table = (
+        torch.randperm(num_blocks, device="cuda").view(len(requests), pages).int()
+    )
+    # Top-k of random block scores: every visible block while they fit.
+    visible_blocks = ((positions + 1) // ratio).int()
+    scores = torch.rand(num_rows, pages * page_size // ratio, device="cuda")
+    blocks = torch.arange(scores.shape[1], device="cuda")
+    scores[blocks >= visible_blocks.unsqueeze(1)] = -1
+    top_scores, block_indices = scores.topk(budget // ratio, dim=1)
+    block_indices = torch.where(top_scores >= 0, block_indices, -1).int()
+    selected = torch.empty(num_rows, budget + ratio, device="cuda", dtype=torch.int32)
+    qsa_indexer_ops.expand_qsa_block_indices(
+        block_indices, positions, visible_blocks, ratio, budget, selected
+    )
+    selected_before = selected.clone()
+
+    impl = Qwen4ExpQSAImpl(
+        num_heads=heads,
+        head_size=head_dim,
+        scale=head_dim**-0.5,
+        num_kv_heads=kv_heads,
+        kv_cache_dtype="auto",
+    )
+    expected = torch.empty_like(q)
+    impl.attend(
+        None,
+        q,
+        kv_cache,
+        selected,
+        block_table,
+        token_to_req,
+        True,
+        expected,
+        output_gate,
+    )
+    common = SimpleNamespace(
+        max_query_len=int(query_lens.max()),
+        num_reqs=len(requests),
+        num_actual_tokens=num_rows,
+        query_start_loc_cpu=query_start_loc,
+        seq_lens_cpu_upper_bound=seq_lens,
+    )
+    actual = torch.full_like(q, torch.nan)
+
+    def masked_prefill() -> None:
+        plan = plan_masked_prefill(common, ratio, torch.device("cuda"))
+        assert plan is not None and plan.num_sparse_rows == 304
+        impl.attend_masked_prefill(
+            None,
+            q,
+            kv_cache,
+            selected,
+            block_table,
+            token_to_req,
+            True,
+            actual,
+            output_gate,
+            plan,
+        )
+
+    masked_prefill()  # compiles the kernels
+    # The steady-state step never blocks the host on the GPU.
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        masked_prefill()
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+    assert torch.equal(selected, selected_before)
+
+
+@requires_qsa_kernels
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
     reason="the fp8 kernel runs on sm_100/sm_103",
 )
 # Per-rank heads at TP1/2/4/8.

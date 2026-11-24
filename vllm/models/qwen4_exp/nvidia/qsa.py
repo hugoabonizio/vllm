@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
-from typing import ClassVar, cast
+from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 from torch import nn
@@ -73,6 +73,9 @@ from ..common.qsa_indexer import QSAIndexerMetadata, qsa_kv_cache_dtype
 from . import model
 from .ops.qsa_indexer import _TOPK_WORKSPACE_BYTES
 from .qsa_indexer import QSAIndexer
+
+if TYPE_CHECKING:
+    from .ops.qsa_masked_prefill import MaskedPrefillPlan
 
 
 @dataclass
@@ -216,6 +219,47 @@ class Qwen4ExpQSAHiSparseMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
         )
 
 
+@dataclass(kw_only=True)
+class Qwen4ExpQSAMaskedPrefillMetadata(Qwen4ExpQSAMetadata):
+    masked_prefill: MaskedPrefillPlan | None
+
+
+class Qwen4ExpQSAMaskedPrefillMetadataBuilder(Qwen4ExpQSAMetadataBuilder):
+    """Plan masked-dense FA4 prefill on Blackwell (ops/qsa_masked_prefill.py)."""
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self.compress_ratio = int(
+            vllm_config.model_config.hf_text_config.indexer_compress_ratio
+        )
+        self.masked_prefill = (
+            current_platform.is_device_capability_family(100)
+            and kv_cache_spec.dtype == torch.bfloat16
+        )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> Qwen4ExpQSAMaskedPrefillMetadata:
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
+        plan = None
+        if self.masked_prefill and not fast_build:
+            from .ops.qsa_masked_prefill import plan_masked_prefill
+
+            plan = plan_masked_prefill(
+                common_attn_metadata, self.compress_ratio, self.device
+            )
+        return Qwen4ExpQSAMaskedPrefillMetadata(**vars(metadata), masked_prefill=plan)
+
+
 class Qwen4ExpQSABackend(AttentionBackend):
     """Full-attention backend used by the merged QSA owner."""
 
@@ -248,7 +292,7 @@ class Qwen4ExpQSABackend(AttentionBackend):
 
     @staticmethod
     def get_builder_cls() -> type[Qwen4ExpQSAMetadataBuilder]:
-        return Qwen4ExpQSAMetadataBuilder
+        return Qwen4ExpQSAMaskedPrefillMetadataBuilder
 
     @classmethod
     def is_sparse(cls) -> bool:
@@ -347,6 +391,21 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         out = output[:num_tokens]
         output_gate = output_gate[:num_tokens]
         if self.index_group is None:
+            plan = getattr(attn_metadata, "masked_prefill", None)
+            if plan is not None and not torch.cuda.is_current_stream_capturing():
+                self.attend_masked_prefill(
+                    layer,
+                    query,
+                    kv_cache,
+                    selected,
+                    attn_metadata.block_table,
+                    token_to_req,
+                    use_prefill_config,
+                    out,
+                    output_gate,
+                    plan,
+                )
+                return output
             self.attend(
                 layer,
                 query,
@@ -421,6 +480,45 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
                 output_gate[num_decode_tokens:],
             )
         return output
+
+    def attend_masked_prefill(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        selected: torch.Tensor,
+        block_table: torch.Tensor,
+        token_to_req: torch.Tensor,
+        use_prefill_config: bool,
+        out: torch.Tensor,
+        output_gate: torch.Tensor,
+        plan: MaskedPrefillPlan,
+    ) -> None:
+        """Masked-dense FA4 for the plan's rows, the sparse kernel for the rest."""
+        from .ops.qsa_masked_prefill import masked_prefill_attention, selection_bitmap
+
+        bitmap = selection_bitmap(selected, plan)
+        if plan.num_sparse_rows:
+            # Zero counts make the sparse kernel skip the plan's rows (index
+            # ops: assigning through plan.rows would sync with the host).
+            counts = selected[:, -1]
+            saved = counts.index_select(0, plan.rows)
+            counts.index_fill_(0, plan.rows, 0)
+            self.attend(
+                layer,
+                query,
+                kv_cache,
+                selected,
+                block_table,
+                token_to_req,
+                use_prefill_config,
+                out,
+                output_gate,
+            )
+            counts.index_copy_(0, plan.rows, saved)
+        masked_prefill_attention(
+            query, kv_cache, block_table, output_gate, out, plan, bitmap, self.scale
+        )
 
     def attend(
         self,
