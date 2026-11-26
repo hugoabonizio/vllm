@@ -46,8 +46,8 @@ steps:
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_echo.py
   - pytest -v -s entrypoints/openai/chat_completion/test_logprob_token_ids.py
-  # The Qwen3.5-35B FP8 MTP case needs two GPUs.
-  - pytest -v -s entrypoints/openai/chat_completion/test_thinking_token_budget.py -k "not qwen35"
+  # The Qwen3.5-35B FP8 MTP case needs two GPUs. The Rust frontend rejects reasoning_end_str.
+  - pytest -v -s entrypoints/openai/chat_completion/test_thinking_token_budget.py -k "not qwen35 and not per_request_reasoning_end_str"
   - pytest -v -s entrypoints/openai/chat_completion/test_root_path.py
   - pytest -v -s entrypoints/openai/chat_completion/test_enable_force_include_usage.py
   # test_batch_completions also sends beam search, which the Rust frontend rejects.
@@ -138,7 +138,7 @@ steps:
   # The multimodal model (SmolVLM, Idefics3) has no Rust processor, so the Rust frontend refuses
   # to start it.
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "not run_batch and not test_metrics_exist and not multimodal"
-  # /tokenizer_info returns 501 in the Rust frontend.
+  # The Rust frontend does not implement /tokenizer_info.
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
   # The Rust frontend loads runtime LoRA paths only under VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES and
   # rejects beam search.

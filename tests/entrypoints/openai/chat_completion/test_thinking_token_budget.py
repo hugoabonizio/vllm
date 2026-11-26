@@ -70,6 +70,7 @@ def server():
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",
+        "--enable-per-request-metrics",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -86,6 +87,7 @@ def server_with_auto_reasoning_config():
         "--gpu-memory-utilization",
         "0.4",
         "--no-async-scheduling",
+        "--enable-per-request-metrics",
     ]
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
@@ -173,7 +175,9 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("client", ["default", "auto_config"], indirect=True)
-async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI):
+async def test_thinking_token_budget_limits_reasoning_with_metrics(
+    client: openai.AsyncOpenAI,
+):
     """Test that thinking_token_budget limits the number of reasoning tokens.
 
     Counts reasoning decode tokens by id, which is robust to how tokens are
@@ -186,14 +190,19 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
 
     prompt_token_ids: list[int] = []
     decode_token_ids: list[int] = []
+    metrics = None
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=100,
+        temperature=0,
         stream=True,
+        stream_options={"include_usage": True},
         extra_body={"thinking_token_budget": THINK_BUDGET, "return_token_ids": True},
     )
     async for chunk in stream:
+        if chunk.usage is not None:
+            metrics = chunk.model_extra.get("metrics")
         if not chunk.choices:
             continue
         if getattr(chunk, "prompt_token_ids", None):
@@ -210,6 +219,8 @@ async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI
         f"reasoning tokens ({reasoning_token_count}) != "
         f"thinking_token_budget ({THINK_BUDGET})"
     )
+    assert metrics is not None
+    assert metrics["time_to_first_content_token_ms"] > metrics["time_to_first_token_ms"]
 
 
 @pytest.mark.asyncio
@@ -239,6 +250,67 @@ async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
         for part in item.content or []
     )
     assert reasoning == chat.choices[0].message.reasoning
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client", ["default"], indirect=True)
+async def test_thinking_token_budget_per_request_reasoning_end_str(
+    client: openai.AsyncOpenAI,
+):
+    """Concurrent requests force their own end string: the override's phrase
+    ends the reasoning (streaming and not) and never leaks into the content,
+    while a request without it keeps the server default."""
+    phrase = "Time to answer."
+    override = {
+        "thinking_token_budget": THINK_BUDGET,
+        "reasoning_end_str": f"{phrase}{REASONING_END_STR}",
+    }
+
+    async def create(extra_body: dict):
+        return await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=MESSAGES,
+            max_tokens=100,
+            temperature=0.0,
+            extra_body=extra_body,
+        )
+
+    async def stream() -> tuple[str, str]:
+        reasoning, content = "", ""
+        chunks = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=MESSAGES,
+            max_tokens=100,
+            temperature=0.0,
+            stream=True,
+            extra_body=override,
+        )
+        async for chunk in chunks:
+            if chunk.choices:
+                delta = chunk.choices[0].delta
+                reasoning += getattr(delta, "reasoning", None) or ""
+                content += delta.content or ""
+        return reasoning, content
+
+    (
+        with_override,
+        default,
+        (streamed_reasoning, streamed_content),
+    ) = await asyncio.gather(
+        create(override),
+        create({"thinking_token_budget": THINK_BUDGET}),
+        stream(),
+    )
+
+    message = with_override.choices[0].message
+    assert message.reasoning.rstrip().endswith(phrase)
+    assert phrase not in (message.content or "")
+    assert streamed_reasoning.rstrip().endswith(phrase)
+    assert phrase not in streamed_content
+    assert phrase not in (default.choices[0].message.reasoning or "")
+
+    with pytest.raises(openai.BadRequestError, match="reasoning_end_str"):
+        await create({**override, "reasoning_end_str": phrase})
 
 
 @pytest.mark.asyncio
